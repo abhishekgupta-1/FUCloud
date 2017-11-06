@@ -1,60 +1,14 @@
 import zmq
 import sys
-import random
 import ast
 import threading
 import json
+import pickle
+from log import LogEntry,Log
+from utility import *
+import random
 
-#python2.7 server.py 1 tcp://127.0.0.1 12345 ["1","2","3"]
-
-class LogEntry(object):
-	def __init__(self, clientId, requestId, data, term):
-		self._clientId = clientId
-		self._requestId = requestId
-		self._data = data
-		self._term = term
-
-class Log(object):
-	def __init__(self, server_id):
-		self._firstIndex = 0
-		self._length = 1;
-		self._entries = [LogEntry(-1, 0, None, 0), ]
-
-	def push(self, value):
-		self._length += 1
-		print value, type(value)
-		trans = LogEntry(value['_clientId'], value['_requestId'], value['_data'], value['_term'])
-		self._entries.append(trans)
-
-	def pop(self):
-		self._length -= 1
-		self._entries.pop()
-
-	def shift(self):
-		pass
-
-	def slice(self, from1, to):
-		return self._entries[from1:to]
-
-
-
-context = zmq.Context()
-
-
-server_id = int(sys.argv[1])
-router_address = sys.argv[2]
-port_no = sys.argv[3]
-port_no2 = '5000'
-clusterMembers = ast.literal_eval(sys.argv[4])
-clusterMembers = [int(x) for x in clusterMembers]
-sender_socket = context.socket(zmq.PUSH)
-sender_socket.connect(router_address +":"+ port_no)
-
-receiver_socket = context.socket(zmq.SUB)
-receiver_socket.setsockopt(zmq.SUBSCRIBE, str(server_id))
-receiver_socket.connect(router_address + ":" +port_no2)
-
-
+# global variables
 currentTerm = 0
 state = 'f'
 votedFor = None
@@ -70,12 +24,27 @@ grantedVotes = 0
 election = random.randint(150, 300)
 heartbeatTime = 100
 commitTime = 500
-log = Log(server_id)
 shift = False
 shiftHeart = False
 electionTimeCall = False
 heartbeatTimeCall = False
+#python2.7 server.py 1 tcp://127.0.0.1 12345 ["1","2","3"]
+context = zmq.Context()
 
+server_id = int(sys.argv[1])
+router_address = sys.argv[2]
+port_no = sys.argv[3]
+port_no2 = '5000'
+clusterMembers = ast.literal_eval(sys.argv[4])
+clusterMembers = [int(x) for x in clusterMembers]
+sender_socket = context.socket(zmq.PUSH)
+sender_socket.connect(router_address +":"+ port_no)
+
+receiver_socket = context.socket(zmq.SUB)
+receiver_socket.setsockopt(zmq.SUBSCRIBE, str(server_id))
+receiver_socket.connect(router_address + ":" +port_no2)
+
+log = Log(server_id)
 
 for member in clusterMembers:
 	matchIndex[member] = 0
@@ -85,7 +54,6 @@ def sendMessage(destid, msg):
 	msg['dest'] = destid
 	sender_socket.send_json(msg)
 
-
 def electionTimeout():
 	global currentTerm, electionTimeCall, state, votedFor, grantedVotes, clusterMember, lastKnownLeaderID, log
 	global server_id, shift, election
@@ -93,7 +61,7 @@ def electionTimeout():
 		if lastKnownLeaderID == None:
 			print("No known leader for me, starting election!")
 		else:
-			print("No heartbeat received from leader starting election!")
+			print("No heartbeat received from leader, starting new election!")
 		currentTerm += 1
 		state = 'c'
 		votedFor = server_id
@@ -133,11 +101,6 @@ def heartbeatTimeout():
 		shiftHeart = False
 	threading.Timer(heartbeatTime/1000.0, heartbeatTimeout).start()
 
-electionTimeout()
-electionTimeCall = True
-heartbeatTimeout()
-
-
 def newNullEntry():
 	global server_id, currentTerm, clusterMembers, server_id, log
 	dummy = LogEntry(-1, 0, None, currentTerm)
@@ -167,7 +130,8 @@ def processEntries(upTo):
 			requestId = entry._requestId
 			msg = {'dest':clientId
 			, 'requestId':requestId
-			, 'status' : 'Success'};
+			, 'status' : 'Success'
+			, 'rpc' : 'addEntryReply'};
 			sendMessage(clientId, msg);
 		# print entry.__dict__, type(entry)
 		# print entry._data, type(entry._data)
@@ -183,7 +147,7 @@ def requestVote(term, candidateId, lastLogIndex, lastLogTerm):
 		if term > currentTerm : #I am in the past
 			print("Election in progress!")
 			currentTerm = term
-			if (state == 'l'): 
+			if (state == 'l'):
 				print("Demoting to follower state.")
 			state = 'f'
 			votedFor = None
@@ -199,7 +163,7 @@ def requestVote(term, candidateId, lastLogIndex, lastLogTerm):
 		else:
 			msg = {'rpc':'replyVote', 'term':currentTerm, 'voteGranted':False};
 	else:  #Sender is In the Past
-		msg = {'rpc':'replyVote', 'term':currentTerm, 'voteGranted':False}; 
+		msg = {'rpc':'replyVote', 'term':currentTerm, 'voteGranted':False};
 	sendMessage(candidateId, msg)
 
 
@@ -219,7 +183,7 @@ def replyVote(term, voteGranted):
 			state = 'l'
 			lastKnownLeaderID = server_id
 			grantedVotes = 0
-			# print "default nextIndex = %d and matchIndex = %d"%(log._length,log._length-1) 
+			# print "default nextIndex = %d and matchIndex = %d"%(log._length,log._length-1)
 			for destid in clusterMembers:
 				if destid != server_id:
 					nextIndex[destid] = log._length
@@ -231,7 +195,7 @@ def replyVote(term, voteGranted):
 
 def appendEntries(term, leaderId, prevLogIndex, prevLogTerm, entries, leaderCommit):
 	global currentTerm, electionTimeCall, lastKnownLeaderID, currentTerm, log, shift
-	global recoveryMode, commitIndex, server_id
+	global recoveryMode, commitIndex, server_id, recoveryPrevLogIndex
 	processEn= False
 	msg = {}
 	if term>=currentTerm:
@@ -298,7 +262,7 @@ def replyAppendEntries(term, followerId, entriesToAppend, success):
 			grantedVotes = 0
 			votedFor= None
 			heartbeatTimeCall = False
-			electionTimeCall = False	
+			electionTimeCall = False
 			shift = True
 		elif success:
 			matchIndex[followerId] += entriesToAppend
@@ -336,18 +300,14 @@ def replyAppendEntries(term, followerId, entriesToAppend, success):
 				pass
 
 
-
 def write_to_file(msg):
 	if msg is not None:
 		with open(msg['fileName'], "a") as myfile:
-		    myfile.write("%s"%(msg['data']))
-
-
+		    myfile.write("%s"%(msg['fileData']))
 
 
 #commitIndex - Start commit from this index
 def commitEntries():
-	# print "iam here iam here iam hereee"
 	global maybeNeedToCommit, commitIndex, clusterMembers, server_id
 	global newCommitIndex, currentTerm, log, commitTime
 	if maybeNeedToCommit == True:
@@ -372,17 +332,16 @@ def commitEntries():
 			processEntries(commitIndex) #Why commitIndex + 1?? #Possible fault
 	threading.Timer(commitTime/1000.0, commitEntries).start()
 
-commitEntries()
 
-def addEntry(requestId, request_data, clientId):
+def addEntry(requestId, requestData, clientId):
 	global currentTerm, state, server_id, log, heartbeatTimeCall, lastKnownLeaderID
 	global heartbeatTimeCall, shiftHeart, shift, electionTimeCall
 	if state == 'l':
-		entry = LogEntry(clientId, requestId, request_data, currentTerm)
+		entry = LogEntry(clientId, requestId, requestData, currentTerm)
 		msg = {'rpc':'appendEntries'
 		, 'term':currentTerm
 		, 'leaderId':server_id
-		, 'prevLogIndex': (log._length)-1	
+		, 'prevLogIndex': (log._length)-1
 		, 'prevLogTerm' : log._entries[-1]._term
 		, 'entries': [entry.__dict__]
 		, 'leaderCommit':commitIndex};
@@ -399,12 +358,24 @@ def addEntry(requestId, request_data, clientId):
 	elif lastKnownLeaderID != None: #forward to leader
 		msg = {'clientId':clientId
 		, 'requestId' : requestId
-		, 'request_data' : request_data
+		, 'requestData' : requestData
 		, 'rpc':'addEntry'};
-		sendMessage(lastKnownLeaderID, msg);
+		sendMessage(lastKnownLeaderID, msg)
 
+def readEntry(requestId, clientId, fileName):
+	data = ""
+	with open(fileName, "rb") as myfile:
+		data = myfile.read()
+	msg = {'rpc' : 'readEntryReply'
+	, 'data' : data
+	, 'requestId' : requestId};
+	sendMessage(clientId, msg)
 
-
+# def main():
+electionTimeout()
+electionTimeCall = True
+heartbeatTimeout()
+commitEntries()
 #Life
 while True:
 	message = receiver_socket.recv()
@@ -433,6 +404,12 @@ while True:
 			, message['success'])
 	elif rpc == 'addEntry':
 		addEntry(message['requestId']
-			, message['request_data']
+			, message['requestData']
 			, message['clientId'])
+	elif rpc == 'readEntry':
+		readEntry(message['requestId']
+			, message['clientId']
+			, message['fileName'])
 
+# if __name__=="__main__":
+# 	main()
